@@ -1,11 +1,13 @@
-use bevy_macro_utils::{get_lit_bool, get_lit_str, BevyManifest, Symbol};
+use bevy_macro_utils::{
+    get_lit_bool_value, get_lit_str_value, BevyManifest, Symbol,
+};
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::{quote, ToTokens};
 use syn::{
     parse::{Parse, ParseStream},
     punctuated::Punctuated,
-    Data, DataStruct, Error, Fields, LitInt, LitStr, NestedMeta, Result, Token,
+    Data, DataStruct, Error, Fields, LitInt, LitStr, Meta, Result, Token,
 };
 
 const UNIFORM_ATTRIBUTE_NAME: Symbol = Symbol("uniform");
@@ -48,7 +50,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
 
     // Read struct-level attributes
     for attr in &ast.attrs {
-        if let Some(attr_ident) = attr.path.get_ident() {
+        if let Some(attr_ident) = attr.path().get_ident() {
             if attr_ident == BIND_GROUP_DATA_ATTRIBUTE_NAME {
                 if let Ok(prepared_data_ident) =
                     attr.parse_args_with(|input: ParseStream| input.parse::<Ident>())
@@ -117,7 +119,7 @@ pub fn derive_as_bind_group(ast: syn::DeriveInput) -> Result<TokenStream> {
     // Read field-level attributes
     for field in fields.iter() {
         for attr in &field.attrs {
-            let Some(attr_ident) = attr.path.get_ident() else {
+            let Some(attr_ident) = attr.path().get_ident() else {
                 continue;
             };
 
@@ -481,7 +483,7 @@ enum BindingMeta {
 struct BindingIndexOptions {
     lit_int: LitInt,
     _comma: Token![,],
-    meta_list: Punctuated<NestedMeta, Token![,]>,
+    meta_list: Punctuated<Meta, Token![,]>,
 }
 
 impl Parse for BindingMeta {
@@ -499,7 +501,7 @@ impl Parse for BindingIndexOptions {
         Ok(Self {
             lit_int: input.parse()?,
             _comma: input.parse()?,
-            meta_list: input.parse_terminated(NestedMeta::parse)?,
+            meta_list: input.parse_terminated(Meta::parse, Token![,])?,
         })
     }
 }
@@ -523,7 +525,7 @@ fn get_uniform_binding_attr(attr: &syn::Attribute) -> Result<(u32, Ident)> {
     Ok((binding_index, ident))
 }
 
-fn get_binding_nested_attr(attr: &syn::Attribute) -> Result<(u32, Vec<NestedMeta>)> {
+fn get_binding_nested_attr(attr: &syn::Attribute) -> Result<(u32, Vec<Meta>)> {
     let binding_meta = attr.parse_args_with(BindingMeta::parse)?;
 
     match binding_meta {
@@ -555,6 +557,35 @@ impl ShaderStageVisibility {
     fn vertex_fragment() -> Self {
         Self::Flags(VisibilityFlags::vertex_fragment())
     }
+    fn from_path(path: &syn::Path) -> Result<Self> {
+        if path.is_ident(&VISIBILITY_ALL) {
+            Ok(ShaderStageVisibility::All)
+        }
+        else if path.is_ident(&VISIBILITY_NONE) {
+            Ok(ShaderStageVisibility::None)
+        }
+        else if path.is_ident(&VISIBILITY_VERTEX) {
+            let mut flags = VisibilityFlags::vertex_fragment();
+            flags.vertex = true;
+            Ok(ShaderStageVisibility::Flags(flags))
+        }
+        else if path.is_ident(&VISIBILITY_FRAGMENT) {
+            let mut flags = VisibilityFlags::vertex_fragment();
+            flags.fragment = true;
+            Ok(ShaderStageVisibility::Flags(flags))
+        }
+        else if path.is_ident(&VISIBILITY_COMPUTE) {
+            let mut flags = VisibilityFlags::vertex_fragment();
+            flags.compute = true;
+            Ok(ShaderStageVisibility::Flags(flags))
+        }
+        else {
+            Err(Error::new_spanned(
+                path,
+                "Not a valid visibility flag. Must be `all`, `none`, or a list-combination of `vertex`, `fragment` and/or `compute`."
+            ))
+        }
+    }
 }
 
 impl VisibilityFlags {
@@ -563,6 +594,26 @@ impl VisibilityFlags {
             vertex: true,
             fragment: true,
             ..Default::default()
+        }
+    }
+    fn add_flag_from_path(&mut self, path: &syn::Path) -> Result<()> {
+        if path.is_ident(&VISIBILITY_VERTEX) {
+            self.vertex = true;
+            Ok(())
+        }
+        else if path.is_ident(&VISIBILITY_FRAGMENT) {
+            self.fragment = true;
+            Ok(())
+        }
+        else if path.is_ident(&VISIBILITY_COMPUTE) {
+            self.compute = true;
+            Ok(())
+        }
+        else {
+            Err(Error::new_spanned(
+                path,
+                "Not a valid visibility flag. Must be `all`, `none`, or a list-combination of `vertex`, `fragment` and/or `compute`."
+            ))
         }
     }
 }
@@ -599,45 +650,38 @@ const VISIBILITY_ALL: Symbol = Symbol("all");
 const VISIBILITY_NONE: Symbol = Symbol("none");
 
 fn get_visibility_flag_value(
-    nested_metas: &Punctuated<NestedMeta, Token![,]>,
+    meta_list: &syn::MetaList,
 ) -> Result<ShaderStageVisibility> {
-    let mut visibility = VisibilityFlags::vertex_fragment();
+    let mut result: Option<ShaderStageVisibility> = None;
 
-    for meta in nested_metas {
-        use syn::{Meta::Path, NestedMeta::Meta};
-        match meta {
-            // Parse `visibility(all)]`.
-            Meta(Path(path)) if path == VISIBILITY_ALL => {
-                return Ok(ShaderStageVisibility::All)
+    meta_list.parse_nested_meta(|meta| {
+        match &mut result {
+            // Initialize the return value.
+            None => {
+                result = Some(ShaderStageVisibility::from_path(&meta.path)?);
             }
-            // Parse `visibility(none)]`.
-            Meta(Path(path)) if path == VISIBILITY_NONE => {
-                return Ok(ShaderStageVisibility::None)
+            // Returning a set of flags. Update flags, or return an error if there's both flags AND `all` or `none`.
+            Some(ShaderStageVisibility::Flags(ref mut flags)) => {
+                flags.add_flag_from_path(&meta.path)?;
             }
-            // Parse `visibility(vertex, ...)]`.
-            Meta(Path(path)) if path == VISIBILITY_VERTEX => {
-                visibility.vertex = true;
+            // Already returning `all` or `none`. Any other items are an error.
+            Some(ShaderStageVisibility::All) | Some(ShaderStageVisibility::None) => { 
+                return Err(Error::new_spanned(
+                    meta.path,
+                    "Not a valid visibility flag. Must be `all`, `none`, or a list-combination of `vertex`, `fragment` and/or `compute`."
+                ));
             }
-            // Parse `visibility(fragment, ...)]`.
-            Meta(Path(path)) if path == VISIBILITY_FRAGMENT => {
-                visibility.fragment = true;
-            }
-            // Parse `visibility(compute, ...)]`.
-            Meta(Path(path)) if path == VISIBILITY_COMPUTE => {
-                visibility.compute = true;
-            }
-            Meta(Path(path)) => return Err(Error::new_spanned(
-                path,
-                "Not a valid visibility flag. Must be `all`, `none`, or a list-combination of `vertex`, `fragment` and/or `compute`."
-            )),
-            _ => return Err(Error::new_spanned(
-                meta,
-                "Invalid visibility format: `visibility(...)`.",
-            )),
         }
-    }
+        Ok(())
+    })?;
 
-    Ok(ShaderStageVisibility::Flags(visibility))
+    match result {
+        Some(v) => Ok(v),
+        None => Err(Error::new_spanned(
+            &meta_list.path,
+            "Invalid visibility format: `visibility(...)`."
+        ))
+    }
 }
 
 #[derive(Default)]
@@ -727,7 +771,7 @@ const DEPTH: &str = "depth";
 const S_INT: &str = "s_int";
 const U_INT: &str = "u_int";
 
-fn get_texture_attrs(metas: Vec<NestedMeta>) -> Result<TextureAttrs> {
+fn get_texture_attrs(metas: Vec<Meta>) -> Result<TextureAttrs> {
     let mut dimension = Default::default();
     let mut sample_type = Default::default();
     let mut multisampled = Default::default();
@@ -737,35 +781,31 @@ fn get_texture_attrs(metas: Vec<NestedMeta>) -> Result<TextureAttrs> {
     let mut visibility = ShaderStageVisibility::vertex_fragment();
 
     for meta in metas {
-        use syn::{
-            Meta::{List, NameValue},
-            NestedMeta::Meta,
-        };
         match meta {
             // Parse #[texture(0, dimension = "...")].
-            Meta(NameValue(m)) if m.path == DIMENSION => {
-                let value = get_lit_str(DIMENSION, &m.lit)?;
+            Meta::NameValue(m) if m.path == DIMENSION => {
+                let value = get_lit_str_value(&m)?;
                 dimension = get_texture_dimension_value(value)?;
             }
             // Parse #[texture(0, sample_type = "...")].
-            Meta(NameValue(m)) if m.path == SAMPLE_TYPE => {
-                let value = get_lit_str(SAMPLE_TYPE, &m.lit)?;
+            Meta::NameValue(m) if m.path == SAMPLE_TYPE => {
+                let value = get_lit_str_value(&m)?;
                 sample_type = get_texture_sample_type_value(value)?;
             }
             // Parse #[texture(0, multisampled = "...")].
-            Meta(NameValue(m)) if m.path == MULTISAMPLED => {
-                multisampled = get_lit_bool(MULTISAMPLED, &m.lit)?;
+            Meta::NameValue(m) if m.path == MULTISAMPLED => {
+                multisampled = get_lit_bool_value(&m)?;
             }
             // Parse #[texture(0, filterable = "...")].
-            Meta(NameValue(m)) if m.path == FILTERABLE => {
-                filterable = get_lit_bool(FILTERABLE, &m.lit)?.into();
+            Meta::NameValue(m) if m.path == FILTERABLE => {
+                filterable = get_lit_bool_value(&m)?.into();
                 filterable_ident = m.path.into();
             }
             // Parse #[texture(0, visibility(...))].
-            Meta(List(m)) if m.path == VISIBILITY => {
-                visibility = get_visibility_flag_value(&m.nested)?;
+            Meta::List(m) if m.path == VISIBILITY => {
+                visibility = get_visibility_flag_value(&m)?;
             }
-            Meta(NameValue(m)) => {
+            Meta::NameValue(m) => {
                 return Err(Error::new_spanned(
                     m.path,
                     "Not a valid name. Available attributes: `dimension`, `sample_type`, `multisampled`, or `filterable`."
@@ -865,26 +905,22 @@ const FILTERING: &str = "filtering";
 const NON_FILTERING: &str = "non_filtering";
 const COMPARISON: &str = "comparison";
 
-fn get_sampler_attrs(metas: Vec<NestedMeta>) -> Result<SamplerAttrs> {
+fn get_sampler_attrs(metas: Vec<Meta>) -> Result<SamplerAttrs> {
     let mut sampler_binding_type = Default::default();
     let mut visibility = ShaderStageVisibility::vertex_fragment();
 
     for meta in metas {
-        use syn::{
-            Meta::{List, NameValue},
-            NestedMeta::Meta,
-        };
         match meta {
             // Parse #[sampler(0, sampler_type = "..."))].
-            Meta(NameValue(m)) if m.path == SAMPLER_TYPE => {
-                let value = get_lit_str(DIMENSION, &m.lit)?;
+            Meta::NameValue(m) if m.path == SAMPLER_TYPE => {
+                let value = get_lit_str_value(&m)?;
                 sampler_binding_type = get_sampler_binding_type_value(value)?;
             }
             // Parse #[sampler(0, visibility(...))].
-            Meta(List(m)) if m.path == VISIBILITY => {
-                visibility = get_visibility_flag_value(&m.nested)?;
+            Meta::List(m) if m.path == VISIBILITY => {
+                visibility = get_visibility_flag_value(&m)?;
             }
-            Meta(NameValue(m)) => {
+            Meta::NameValue(m) => {
                 return Err(Error::new_spanned(
                     m.path,
                     "Not a valid name. Available attributes: `sampler_type`.",
@@ -895,7 +931,7 @@ fn get_sampler_attrs(metas: Vec<NestedMeta>) -> Result<SamplerAttrs> {
                     meta,
                     "Not a name value pair: `foo = \"...\"`",
                 ));
-            }
+            }        
         }
     }
 
@@ -928,22 +964,21 @@ struct StorageAttrs {
 const READ_ONLY: Symbol = Symbol("read_only");
 const BUFFER: Symbol = Symbol("buffer");
 
-fn get_storage_binding_attr(metas: Vec<NestedMeta>) -> Result<StorageAttrs> {
+fn get_storage_binding_attr(metas: Vec<Meta>) -> Result<StorageAttrs> {
     let mut visibility = ShaderStageVisibility::vertex_fragment();
     let mut read_only = false;
     let mut buffer = false;
 
     for meta in metas {
-        use syn::{Meta::List, Meta::Path, NestedMeta::Meta};
         match meta {
             // Parse #[storage(0, visibility(...))].
-            Meta(List(m)) if m.path == VISIBILITY => {
-                visibility = get_visibility_flag_value(&m.nested)?;
-            }
-            Meta(Path(path)) if path == READ_ONLY => {
+            Meta::List(m) if m.path == VISIBILITY => {
+                visibility = get_visibility_flag_value(&m)?;
+            }            
+            Meta::Path(path) if path == READ_ONLY => {
                 read_only = true;
             }
-            Meta(Path(path)) if path == BUFFER => {
+            Meta::Path(path) if path == BUFFER => {
                 buffer = true;
             }
             _ => {
