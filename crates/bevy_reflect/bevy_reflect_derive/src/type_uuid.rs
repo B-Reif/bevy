@@ -11,31 +11,27 @@ pub(crate) fn type_uuid_derive(input: proc_macro::TokenStream) -> proc_macro::To
     // Construct a representation of Rust code as a syntax tree
     // that we can manipulate
     let ast: DeriveInput = syn::parse(input).unwrap();
-    // Build the trait implementation
-    let type_ident = ast.ident;
 
     let mut uuid = None;
-    for attribute in ast.attrs.iter().filter_map(|attr| attr.parse_meta().ok()) {
-        let Meta::NameValue(name_value) = attribute else {
-            continue;
+
+    // `#[uuid = value]`
+    //    ^^^^
+    for attr in ast.attrs.iter() {
+        // `#[uuid = value]`
+        //           ^^^^^
+        let expr = match &attr.meta {
+            Meta::NameValue(name_value) if name_value.path.is_ident("uuid") => &name_value.value,
+            _ => {
+                continue;
+            }
         };
 
-        if name_value
-            .path
-            .get_ident()
-            .map(|i| i != "uuid")
-            .unwrap_or(true)
-        {
-            continue;
-        }
-
-        let uuid_str = match name_value.lit {
-            Lit::Str(lit_str) => lit_str,
+        let lit_str = match expr {
+            Expr::Lit(ExprLit { lit: Lit::Str(lit_str), .. }) => lit_str,
             _ => panic!("`uuid` attribute must take the form `#[uuid = \"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\"`."),
         };
-
         uuid = Some(
-            Uuid::parse_str(&uuid_str.value())
+            Uuid::parse_str(&lit_str.value())
                 .expect("Value specified to `#[uuid]` attribute is not a valid UUID."),
         );
     }
@@ -43,7 +39,7 @@ pub(crate) fn type_uuid_derive(input: proc_macro::TokenStream) -> proc_macro::To
     let uuid =
         uuid.expect("No `#[uuid = \"xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx\"` attribute found.");
     gen_impl_type_uuid(TypeUuidDef {
-        type_ident,
+        type_ident: ast.ident,
         generics: ast.generics,
         uuid,
     })

@@ -6,8 +6,9 @@
 
 use crate::REFLECT_ATTRIBUTE_NAME;
 use quote::ToTokens;
+use syn::parse::Parse;
 use syn::spanned::Spanned;
-use syn::{Attribute, Lit, Meta, NestedMeta};
+use syn::{Attribute, ExprLit, Lit, Meta, MetaList, MetaNameValue};
 
 pub(crate) static IGNORE_SERIALIZATION_ATTR: &str = "skip_serializing";
 pub(crate) static IGNORE_ALL_ATTR: &str = "ignore";
@@ -54,6 +55,18 @@ pub(crate) struct ReflectFieldAttr {
     pub default: DefaultBehavior,
 }
 
+impl ReflectFieldAttr {
+    pub fn set_ignore(
+        &mut self,
+        path: &syn::Path,
+        behavior: ReflectIgnoreBehavior,
+    ) -> Result<(), syn::Error> {
+        (self.ignore == ReflectIgnoreBehavior::None)
+            .then(|| self.ignore = behavior)
+            .ok_or_else(|| syn::Error::new_spanned(path, format!("Only one of ['{IGNORE_SERIALIZATION_ATTR}','{IGNORE_ALL_ATTR}'] is allowed")))
+    }
+}
+
 /// Controls how the default value is determined for a field.
 #[derive(Default)]
 pub(crate) enum DefaultBehavior {
@@ -76,10 +89,9 @@ pub(crate) fn parse_field_attrs(attrs: &[Attribute]) -> Result<ReflectFieldAttr,
 
     let attrs = attrs
         .iter()
-        .filter(|a| a.path.is_ident(REFLECT_ATTRIBUTE_NAME));
+        .filter(|a| a.path().is_ident(REFLECT_ATTRIBUTE_NAME));
     for attr in attrs {
-        let meta = attr.parse_meta()?;
-        if let Err(err) = parse_meta(&mut args, &meta) {
+        if let Err(err) = parse_meta(&mut args, &attr.meta) {
             if let Some(ref mut error) = errors {
                 error.combine(err);
             } else {
@@ -95,18 +107,46 @@ pub(crate) fn parse_field_attrs(attrs: &[Attribute]) -> Result<ReflectFieldAttr,
     }
 }
 
+fn parse_name_value(args: &mut ReflectFieldAttr, pair: &MetaNameValue) -> Result<(), syn::Error> {
+    if pair.path.is_ident(DEFAULT_ATTR) {
+        let span = pair.span();
+        match &pair.value {
+            syn::Expr::Path(path) => {
+                args.default = DefaultBehavior::Func(path.clone());
+                Ok(())
+            }
+            syn::Expr::Lit(ExprLit {
+                lit: Lit::Str(lit_str),
+                ..
+            }) => {
+                args.default = DefaultBehavior::Func(lit_str.parse()?);
+                Ok(())
+            }
+            expr => Err(syn::Error::new(
+                span,
+                format!(
+                    "expected a string literal containing the name of a function, but found: {}",
+                    expr.to_token_stream()
+                ),
+            )),
+        }
+    } else {
+        let path = &pair.path;
+        Err(syn::Error::new(
+            path.span(),
+            format!("unknown attribute parameter: {}", path.to_token_stream()),
+        ))
+    }
+}
+
 /// Recursively parses attribute metadata for things like `#[reflect(ignore)]` and `#[reflect(default = "foo")]`
 fn parse_meta(args: &mut ReflectFieldAttr, meta: &Meta) -> Result<(), syn::Error> {
     match meta {
         Meta::Path(path) if path.is_ident(IGNORE_SERIALIZATION_ATTR) => {
-            (args.ignore == ReflectIgnoreBehavior::None)
-                .then(|| args.ignore = ReflectIgnoreBehavior::IgnoreSerialization)
-                .ok_or_else(|| syn::Error::new_spanned(path, format!("Only one of ['{IGNORE_SERIALIZATION_ATTR}','{IGNORE_ALL_ATTR}'] is allowed")))
+            args.set_ignore(path, ReflectIgnoreBehavior::IgnoreSerialization)
         }
         Meta::Path(path) if path.is_ident(IGNORE_ALL_ATTR) => {
-            (args.ignore == ReflectIgnoreBehavior::None)
-                .then(|| args.ignore = ReflectIgnoreBehavior::IgnoreAlways)
-                .ok_or_else(|| syn::Error::new_spanned(path, format!("Only one of ['{IGNORE_SERIALIZATION_ATTR}','{IGNORE_ALL_ATTR}'] is allowed")))
+            args.set_ignore(path, ReflectIgnoreBehavior::IgnoreAlways)
         }
         Meta::Path(path) if path.is_ident(DEFAULT_ATTR) => {
             args.default = DefaultBehavior::Default;
@@ -116,38 +156,21 @@ fn parse_meta(args: &mut ReflectFieldAttr, meta: &Meta) -> Result<(), syn::Error
             path.span(),
             format!("unknown attribute parameter: {}", path.to_token_stream()),
         )),
-        Meta::NameValue(pair) if pair.path.is_ident(DEFAULT_ATTR) => {
-            let lit = &pair.lit;
-            match lit {
-                Lit::Str(lit_str) => {
-                    args.default = DefaultBehavior::Func(lit_str.parse()?);
-                    Ok(())
-                }
-                err => {
-                    Err(syn::Error::new(
-                        err.span(),
-                        format!("expected a string literal containing the name of a function, but found: {}", err.to_token_stream()),
-                    ))
-                }
-            }
-        }
-        Meta::NameValue(pair) => {
-            let path = &pair.path;
-            Err(syn::Error::new(
-                path.span(),
-                format!("unknown attribute parameter: {}", path.to_token_stream()),
-            ))
-        }
+        Meta::NameValue(pair) => parse_name_value(args, &pair),
         Meta::List(list) if !list.path.is_ident(REFLECT_ATTRIBUTE_NAME) => {
             Err(syn::Error::new(list.path.span(), "unexpected property"))
         }
-        Meta::List(list) => {
-            for nested in &list.nested {
-                if let NestedMeta::Meta(meta) = nested {
-                    parse_meta(args, meta)?;
-                }
+        Meta::List(list) => list.parse_nested_meta(|parse_nested_meta| {
+            if let Ok(name_value) = MetaNameValue::parse(parse_nested_meta.input) {
+                let meta = Meta::NameValue(name_value);
+                return parse_meta(args, &meta);
             }
-            Ok(())
-        }
+            if let Ok(list) = MetaList::parse(parse_nested_meta.input) {
+                let meta = Meta::List(list);
+                return parse_meta(args, &meta);
+            }
+            let meta = Meta::Path(parse_nested_meta.path);
+            parse_meta(args, &meta)
+        }),
     }
 }

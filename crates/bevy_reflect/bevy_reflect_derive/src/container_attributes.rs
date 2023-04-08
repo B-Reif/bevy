@@ -7,13 +7,13 @@
 
 use crate::fq_std::{FQAny, FQOption};
 use crate::utility;
-use proc_macro2::{Ident, Span};
-use quote::quote_spanned;
+use proc_macro2::{Ident, Span, TokenTree};
+use quote::{quote_spanned, ToTokens};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::token::Comma;
-use syn::{Meta, NestedMeta, Path};
+use syn::{Attribute, Meta, MetaList, Path};
 
 // The "special" trait idents that are used internally for reflection.
 // Received via attributes like `#[reflect(PartialEq, Hash, ...)]`
@@ -128,80 +128,93 @@ pub(crate) struct ReflectTraits {
 }
 
 impl ReflectTraits {
+    pub fn from_attrs(attrs: Vec<Attribute>) -> syn::Result<Self> {
+        todo!()
+    }
     /// Create a new [`ReflectTraits`] instance from a set of nested metas.
-    pub fn from_nested_metas(
-        nested_metas: &Punctuated<NestedMeta, Comma>,
-    ) -> Result<Self, syn::Error> {
+    pub fn from_meta_list(meta_list: &MetaList) -> Result<Self, syn::Error> {
         let mut traits = ReflectTraits::default();
-        for nested_meta in nested_metas.iter() {
-            match nested_meta {
-                // Handles `#[reflect( Hash, Default, ... )]`
-                NestedMeta::Meta(Meta::Path(path)) => {
-                    // Get the first ident in the path (hopefully the path only contains one and not `std::hash::Hash`)
-                    let Some(segment) = path.segments.iter().next() else {
-                        continue;
-                    };
-                    let ident = &segment.ident;
-                    let ident_name = ident.to_string();
+        meta_list.parse_nested_meta(|meta| {
+            // Get the first ident in the path (hopefully the path only contains one and not `std::hash::Hash`)
+            let Some(segment) = meta.path.segments.iter().next() else {
+                todo!()
+            };
+        })
+        panic!("NYI: MetaList");
+        // for nested_meta in nested_metas.iter() {
+        //     match nested_meta {
+        //         // Handles `#[reflect( Hash, Default, ... )]`
+        //         Meta::Path(path) => {
+        //             // Get the first ident in the path (hopefully the path only contains one and not `std::hash::Hash`)
+        //             let Some(segment) = path.segments.iter().next() else {
+        //                 continue;
+        //             };
+        //             let ident = &segment.ident;
+        //             let ident_name = ident.to_string();
 
-                    // Track the span where the trait is implemented for future errors
-                    let span = ident.span();
+        //             // Track the span where the trait is implemented for future errors
+        //             let span = ident.span();
 
-                    match ident_name.as_str() {
-                        DEBUG_ATTR => {
-                            traits.debug = traits.debug.merge(TraitImpl::Implemented(span))?;
-                        }
-                        PARTIAL_EQ_ATTR => {
-                            traits.partial_eq =
-                                traits.partial_eq.merge(TraitImpl::Implemented(span))?;
-                        }
-                        HASH_ATTR => {
-                            traits.hash = traits.hash.merge(TraitImpl::Implemented(span))?;
-                        }
-                        // We only track reflected idents for traits not considered special
-                        _ => {
-                            // Create the reflect ident
-                            // We set the span to the old ident so any compile errors point to that ident instead
-                            let mut reflect_ident = utility::get_reflect_ident(&ident_name);
-                            reflect_ident.set_span(span);
+        //             match ident_name.as_str() {
+        //                 DEBUG_ATTR => {
+        //                     traits.debug = traits.debug.merge(TraitImpl::Implemented(span))?;
+        //                 }
+        //                 PARTIAL_EQ_ATTR => {
+        //                     traits.partial_eq =
+        //                         traits.partial_eq.merge(TraitImpl::Implemented(span))?;
+        //                 }
+        //                 HASH_ATTR => {
+        //                     traits.hash = traits.hash.merge(TraitImpl::Implemented(span))?;
+        //                 }
+        //                 // We only track reflected idents for traits not considered special
+        //                 _ => {
+        //                     // Create the reflect ident
+        //                     // We set the span to the old ident so any compile errors point to that ident instead
+        //                     let mut reflect_ident = utility::get_reflect_ident(&ident_name);
+        //                     reflect_ident.set_span(span);
 
-                            add_unique_ident(&mut traits.idents, reflect_ident)?;
-                        }
-                    }
-                }
-                // Handles `#[reflect( Hash(custom_hash_fn) )]`
-                NestedMeta::Meta(Meta::List(list)) => {
-                    // Get the first ident in the path (hopefully the path only contains one and not `std::hash::Hash`)
-                    let Some(segment) = list.path.segments.iter().next() else {
-                        continue;
-                    };
+        //                     add_unique_ident(&mut traits.idents, reflect_ident)?;
+        //                 }
+        //             }
+        //         }
+        //         // Handles `#[reflect( Hash(custom_hash_fn) )]`
+        //         Meta::List(list) => {
+        //             // Get the first ident in the path (hopefully the path only contains one and not `std::hash::Hash`)
+        //             // `#[reflect( Hash(custom_hash_fn) )]`
+        //             //             ^^^^
+        //             let Some(attr_segment) = list.path.segments.iter().next() else {
+        //                 continue;
+        //             };
 
-                    let ident = segment.ident.to_string();
+        //             // Get the custom function identifier
+        //             // `#[reflect( Hash(custom_hash_fn) )]`
+        //             //                  ^^^^^^^^^^^^^^
+        //             let trait_func_ident = match list.into_token_stream().into_iter().next() {
+        //                 Some(TokenTree::Ident(i)) => {
+        //                     TraitImpl::Custom(i.into(), attr_segment.span())
+        //                 }
+        //                 _ => {
+        //                     continue;
+        //                 }
+        //             };
 
-                    // Track the span where the trait is implemented for future errors
-                    let span = ident.span();
-
-                    let list_meta = list.nested.iter().next();
-                    if let Some(NestedMeta::Meta(Meta::Path(path))) = list_meta {
-                        // This should be the path of the custom function
-                        let trait_func_ident = TraitImpl::Custom(path.clone(), span);
-                        match ident.as_str() {
-                            DEBUG_ATTR => {
-                                traits.debug = traits.debug.merge(trait_func_ident)?;
-                            }
-                            PARTIAL_EQ_ATTR => {
-                                traits.partial_eq = traits.partial_eq.merge(trait_func_ident)?;
-                            }
-                            HASH_ATTR => {
-                                traits.hash = traits.hash.merge(trait_func_ident)?;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
+        //             // Assign the function identifier to the matched reflect trait
+        //             match attr_segment.ident.to_string().as_str() {
+        //                 DEBUG_ATTR => {
+        //                     traits.debug = traits.debug.merge(trait_func_ident)?;
+        //                 }
+        //                 PARTIAL_EQ_ATTR => {
+        //                     traits.partial_eq = traits.partial_eq.merge(trait_func_ident)?;
+        //                 }
+        //                 HASH_ATTR => {
+        //                     traits.hash = traits.hash.merge(trait_func_ident)?;
+        //                 }
+        //                 _ => {}
+        //             }
+        //         }
+        //         _ => {}
+        //     }
+        // }
 
         Ok(traits)
     }
@@ -307,8 +320,10 @@ impl ReflectTraits {
 
 impl Parse for ReflectTraits {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let result = Punctuated::<NestedMeta, Comma>::parse_terminated(input)?;
-        ReflectTraits::from_nested_metas(&result)
+        let attrs = input.call(Attribute::parse_outer)?;
+        ReflectTraits::from_attrs(attrs)
+        // let result = Punctuated::<Meta, Comma>::parse_terminated(input)?;
+        // ReflectTraits::from_nested_metas(&result)
     }
 }
 

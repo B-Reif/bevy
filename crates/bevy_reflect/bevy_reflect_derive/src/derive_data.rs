@@ -2,8 +2,12 @@ use crate::container_attributes::ReflectTraits;
 use crate::field_attributes::{parse_field_attrs, ReflectFieldAttr};
 use crate::fq_std::{FQAny, FQDefault, FQSend, FQSync};
 use crate::utility::{members_to_serialization_denylist, WhereClauseOptions};
+use bevy_macro_utils::get_lit_str_value;
 use bit_set::BitSet;
+
 use quote::quote;
+
+use syn::token::Comma;
 
 use crate::{utility, REFLECT_ATTRIBUTE_NAME, REFLECT_VALUE_ATTRIBUTE_NAME};
 use syn::punctuated::Punctuated;
@@ -136,49 +140,53 @@ impl<'a> ReflectDerive<'a> {
         #[cfg(feature = "documentation")]
         let mut doc = crate::documentation::Documentation::default();
 
-        for attribute in input.attrs.iter().filter_map(|attr| attr.parse_meta().ok()) {
-            match attribute {
-                Meta::List(meta_list) if meta_list.path.is_ident(REFLECT_ATTRIBUTE_NAME) => {
-                    if !matches!(reflect_mode, None | Some(ReflectMode::Normal)) {
-                        return Err(syn::Error::new(
-                            meta_list.span(),
-                            format_args!("cannot use both `#[{REFLECT_ATTRIBUTE_NAME}]` and `#[{REFLECT_VALUE_ATTRIBUTE_NAME}]`"),
-                        ));
-                    }
+        for attr in input.attrs.iter() {
+            // Ensure the attributes don't include both types of reflect mode.
+            if attr.path().is_ident(REFLECT_ATTRIBUTE_NAME) {
+                if matches!(reflect_mode, Some(ReflectMode::Value)) {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        format_args!("cannot use both `#[{REFLECT_ATTRIBUTE_NAME}]` and `#[{REFLECT_VALUE_ATTRIBUTE_NAME}]`"),
+                    ));
+                }
 
-                    reflect_mode = Some(ReflectMode::Normal);
-                    let new_traits = ReflectTraits::from_nested_metas(&meta_list.nested)?;
-                    traits = traits.merge(new_traits)?;
-                }
-                Meta::List(meta_list) if meta_list.path.is_ident(REFLECT_VALUE_ATTRIBUTE_NAME) => {
-                    if !matches!(reflect_mode, None | Some(ReflectMode::Value)) {
-                        return Err(syn::Error::new(
-                            meta_list.span(),
-                            format_args!("cannot use both `#[{REFLECT_ATTRIBUTE_NAME}]` and `#[{REFLECT_VALUE_ATTRIBUTE_NAME}]`"),
-                        ));
-                    }
+                reflect_mode = Some(ReflectMode::Normal);
+                let new_traits = match &attr.meta {
+                    Meta::Path(_) => todo!(),
+                    Meta::List(meta_list) => ReflectTraits::from_meta_list(meta_list),
+                    Meta::NameValue(_) => todo!(),
+                }?;
+                // let args =
+                //     attr.parse_args_with(Punctuated::<Meta, Comma>::parse_separated_nonempty)?;
+                // let new_traits = ReflectTraits::from_nested_metas(&args)?;
+                traits = traits.merge(new_traits)?;
+            }
 
-                    reflect_mode = Some(ReflectMode::Value);
-                    let new_traits = ReflectTraits::from_nested_metas(&meta_list.nested)?;
-                    traits = traits.merge(new_traits)?;
+            if attr.path().is_ident(REFLECT_VALUE_ATTRIBUTE_NAME) {
+                if matches!(reflect_mode, Some(ReflectMode::Normal)) {
+                    return Err(syn::Error::new(
+                        attr.span(),
+                        format_args!("cannot use both `#[{REFLECT_ATTRIBUTE_NAME}]` and `#[{REFLECT_VALUE_ATTRIBUTE_NAME}]`"),
+                    ));
                 }
-                Meta::Path(path) if path.is_ident(REFLECT_VALUE_ATTRIBUTE_NAME) => {
-                    if !matches!(reflect_mode, None | Some(ReflectMode::Value)) {
-                        return Err(syn::Error::new(
-                            path.span(),
-                            format_args!("cannot use both `#[{REFLECT_ATTRIBUTE_NAME}]` and `#[{REFLECT_VALUE_ATTRIBUTE_NAME}]`"),
-                        ));
-                    }
 
-                    reflect_mode = Some(ReflectMode::Value);
-                }
-                #[cfg(feature = "documentation")]
-                Meta::NameValue(pair) if pair.path.is_ident("doc") => {
-                    if let syn::Lit::Str(lit) = pair.lit {
-                        doc.push(lit.value());
-                    }
-                }
-                _ => continue,
+                reflect_mode = Some(ReflectMode::Value);
+                let new_traits = match &attr.meta {
+                    Meta::Path(_) => todo!(),
+                    Meta::List(meta_list) => ReflectTraits::from_meta_list(meta_list),
+                    Meta::NameValue(_) => todo!(),
+                }?;
+                // let args =
+                //     attr.parse_args_with(Punctuated::<Meta, Comma>::parse_separated_nonempty)?;
+                // let new_traits = ReflectTraits::from_nested_metas(&args)?;
+                traits = traits.merge(new_traits)?;
+            }
+
+            #[cfg(feature = "documentation")]
+            if attr.path().is_ident("doc") {
+                let name_value = attr.meta.require_name_value()?;
+                let lit_str = get_lit_str_value(name_value)?;
+                doc.push(lit_str.value());
             }
         }
 

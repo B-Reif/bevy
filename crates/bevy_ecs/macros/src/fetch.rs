@@ -14,7 +14,7 @@ use crate::bevy_ecs_path;
 #[derive(Default)]
 struct FetchStructAttributes {
     pub is_mutable: bool,
-    pub derive_args: Punctuated<syn::NestedMeta, syn::token::Comma>,
+    pub derive_args: TokenStream,
 }
 
 static MUTABLE_ATTRIBUTE_NAME: &str = "mutable";
@@ -33,18 +33,14 @@ pub fn derive_world_query_impl(input: TokenStream) -> TokenStream {
     let visibility = ast.vis;
 
     let mut fetch_struct_attributes = FetchStructAttributes::default();
-    for attr in &ast.attrs {
-        if !attr
-            .path
-            .get_ident()
-            .map_or(false, |ident| ident == WORLD_QUERY_ATTRIBUTE_NAME)
-        {
-            continue;
-        }
-
-        attr.parse_args_with(|input: ParseStream| {
-            let meta = input.parse_terminated::<syn::Meta, syn::token::Comma>(syn::Meta::parse)?;
-            for meta in meta {
+    for attr in ast
+        .attrs
+        .iter()
+        .filter(|a| a.path().is_ident(WORLD_QUERY_ATTRIBUTE_NAME))
+    {
+        attr.parse_args_with(|s: ParseStream| {
+            let punctuated = s.parse_terminated(syn::Meta::parse, Token![,])?;
+            for meta in punctuated {
                 let ident = meta.path().get_ident().unwrap_or_else(|| {
                     panic!(
                         "Unrecognized attribute: `{}`",
@@ -61,9 +57,9 @@ pub fn derive_world_query_impl(input: TokenStream) -> TokenStream {
                     }
                 } else if ident == DERIVE_ATTRIBUTE_NAME {
                     if let syn::Meta::List(meta_list) = meta {
-                        fetch_struct_attributes
-                            .derive_args
-                            .extend(meta_list.nested.iter().cloned());
+                        // Parses args to derive, e.g. #[derive(Clone, Copy)]
+                        //                                      ^^^^^^^^^^^
+                        fetch_struct_attributes.derive_args.extend(meta_list.tokens);
                     } else {
                         panic!(
                             "Expected a structured list within the `{DERIVE_ATTRIBUTE_NAME}` attribute",

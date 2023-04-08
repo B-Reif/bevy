@@ -1,7 +1,7 @@
 #![allow(clippy::type_complexity)]
 
 use bevy_macro_utils::BevyManifest;
-use encase_derive_impl::{implement, syn};
+use encase_derive_impl::implement;
 
 const ENCASE: &str = "encase";
 
